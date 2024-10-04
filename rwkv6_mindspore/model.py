@@ -2,14 +2,14 @@
 # @File         : model.py
 # @Date         : 2024/10/02 17:12:41
 # @Author       : Eliwii_Keeya
-# @Modified from: yuunnn-w, 2024 -- RWKV_Pytorch
+# @Modified from: yuunnn-w, et al., 2024 -- RWKV_Pytorch
 
 import mindspore
 import mindspore.nn as nn
 import mindspore.ops as ops
 import mindspore.numpy as np
 from typing import Tuple
-
+from silu_manual import SiLUManual, silu_manual
 
 class RWKV_Block(nn.Cell):
     """
@@ -43,7 +43,8 @@ class RWKV_Block(nn.Cell):
 
 
         # 初始化激活函数
-        self.silu = nn.SiLU()
+        # self.silu = nn.SiLU()
+        self.silu = SiLUManual() # NOTE: ops.SiLU 包含错误
         
         # 初始化注意力参数
         self.att_time_maa_x = mindspore.Parameter(block_w['att.time_maa_x'])
@@ -58,15 +59,15 @@ class RWKV_Block(nn.Cell):
         self.att_time_decay_w1 = mindspore.Parameter(block_w['att.time_decay_w1'])
         self.att_time_decay_w2 = mindspore.Parameter(block_w['att.time_decay_w2'])
         self.att_time_faaaa = mindspore.Parameter(block_w['att.time_faaaa'])
-        self.att_receptance = nn.Linear(self.n_embd, self.n_embd, bias=False)
+        self.att_receptance = nn.Dense(self.n_embd, self.n_embd, has_bias=False)
         self.att_receptance.weight = mindspore.Parameter(block_w['att.receptance.weight'])
-        self.att_key = nn.Linear(self.n_embd, self.n_embd, bias=False)
+        self.att_key = nn.Dense(self.n_embd, self.n_embd, has_bias=False)
         self.att_key.weight = mindspore.Parameter(block_w['att.key.weight'])
-        self.att_value = nn.Linear(self.n_embd, self.n_embd, bias=False)
+        self.att_value = nn.Dense(self.n_embd, self.n_embd, has_bias=False)
         self.att_value.weight = mindspore.Parameter(block_w['att.value.weight'])
-        self.att_output = nn.Linear(self.n_embd, self.n_embd, bias=False)
+        self.att_output = nn.Dense(self.n_embd, self.n_embd, has_bias=False)
         self.att_output.weight = mindspore.Parameter(block_w['att.output.weight'])
-        self.att_gate = nn.Linear(self.n_embd, self.n_embd, bias=False)
+        self.att_gate = nn.Dense(self.n_embd, self.n_embd, has_bias=False)
         self.att_gate.weight = mindspore.Parameter(block_w['att.gate.weight'])
         
         if self.onnx_opset >= 18:
@@ -80,11 +81,11 @@ class RWKV_Block(nn.Cell):
         # 初始化前馈参数
         self.ffn_time_maa_k = mindspore.Parameter(block_w['ffn.time_maa_k'])
         self.ffn_time_maa_r = mindspore.Parameter(block_w['ffn.time_maa_r'])
-        self.ffn_key = nn.Linear(self.n_embd, self.n_embd, bias=False)
+        self.ffn_key = nn.Dense(self.n_embd, self.n_embd, has_bias=False)
         self.ffn_key.weight = mindspore.Parameter(block_w['ffn.key.weight'])
-        self.ffn_receptance = nn.Linear(self.n_embd, self.n_embd, bias=False)
+        self.ffn_receptance = nn.Dense(self.n_embd, self.n_embd, has_bias=False)
         self.ffn_receptance.weight = mindspore.Parameter(block_w['ffn.receptance.weight'])
-        self.ffn_value = nn.Linear(self.n_embd, self.n_embd, bias=False)
+        self.ffn_value = nn.Dense(self.n_embd, self.n_embd, has_bias=False)
         self.ffn_value.weight = mindspore.Parameter(block_w['ffn.value.weight'])
 
     def manual_layer_norm(self, x: mindspore.Tensor, weight: mindspore.Tensor, bias: mindspore.Tensor, eps: float = 1e-5) -> mindspore.Tensor:
@@ -98,8 +99,8 @@ class RWKV_Block(nn.Cell):
         Returns:
             mindspore.Tensor: 经过手动层归一化后的张量，形状与输入的 x 相同。
         """
-        mean = x.mean(dim=-1, keepdim=True)
-        var = x.var(dim=-1, keepdim=True, unbiased=False)
+        mean = x.mean(axis=-1, keep_dims=True)
+        var = x.var(axis=-1, keepdims=True, ddof=False)
         x_normalized = (x - mean) / ops.sqrt(var + eps)
         x_scaled = x_normalized * weight#.unsqueeze(-1) #这里会自动广播对齐
         x_shifted = x_scaled + bias#.unsqueeze(-1)
@@ -124,8 +125,8 @@ class RWKV_Block(nn.Cell):
         channels_per_group = C // num_groups
         # 重塑x以便于分组
         x = x.view(N, num_groups, channels_per_group)
-        mean = x.mean(dim=2, keepdim=True)
-        var = x.var(dim=2, keepdim=True, unbiased=False)
+        mean = x.mean(axis=2, keep_dims=True)
+        var = x.var(axis=2, keepdims=True, ddof=False)
         x_normalized = (x - mean) / ops.sqrt(var + eps)
         x_normalized = x_normalized.view(N, C)
         # 应用权重和偏置
@@ -151,7 +152,7 @@ class RWKV_Block(nn.Cell):
         xk = x + sx * self.ffn_time_maa_k
         xr = x + sx * self.ffn_time_maa_r
         r = ops.sigmoid(self.ffn_receptance(xr))
-        k = ops.relu(self.ffn_key(xk)).pow(2)
+        k = silu_manual(self.ffn_key(xk)).pow(2)
         output = r * self.ffn_value(k)
         return output
 
@@ -179,7 +180,7 @@ class RWKV_Block(nn.Cell):
         xr = x + sx_lerp * self.ffn_time_maa_r
 
         r = ops.sigmoid(self.ffn_receptance(xr)) # [Batch, L, 2048]
-        k = ops.relu(self.ffn_key(xk)).pow(2)
+        k = silu_manual(self.ffn_key(xk)).pow(2)
 
         output = r * self.ffn_value(k)
         return output
@@ -195,7 +196,7 @@ class RWKV_Block(nn.Cell):
         Returns:
             mindspore.Tensor: 混合后的时间状态张量，形状与输入的state相同。
         """
-        batch_size, H, S = x.size(0), self.n_head, self.head_size
+        batch_size, H, S = x.shape[0], self.n_head, self.head_size
         i1 = (2 + S) * i + 1
 
         sx = state[:, i1] - x
@@ -250,10 +251,10 @@ class RWKV_Block(nn.Cell):
         Returns:
             mindspore.Tensor: 混合后的时间状态张量，形状与输入的state相同。
         """
-        batch_size, L, H, S = x.size(0), x.size(1), self.n_head, self.head_size
+        batch_size, L, H, S = x.shape[0], x.shape[1], self.n_head, self.head_size
         i1 = (2 + S) * i + 1
         # 初始化结果张量
-        sx_lerp = ops.empty(x.shape)
+        sx_lerp = mindspore.numpy.empty(x.shape)
         
         # 计算初始插值
         sx_lerp[:, 0] = state[:, i1] - x[:, 0]
@@ -284,7 +285,7 @@ class RWKV_Block(nn.Cell):
         v = self.att_value(xv).view(batch_size, L, H, 1, S)
         g = self.silu(self.att_gate(xg)) # [10, 100, 2048]
         # 使用注意力机制更新状态
-        state_s = ops.empty(batch_size, L, H, S, S)#初始化state_s的结果张量
+        state_s = mindspore.numpy.empty((batch_size, L, H, S, S))#初始化state_s的结果张量
         s = state[:, (2+S)*i+2:(2+S)*(i+1)].view(batch_size, H, S, S)
         state_s[:, 0] = s # 把第一个a_{t-1, j}赋值给state_s
         a = k @ v # a: [batch_size, L, H, S, S]
@@ -311,7 +312,7 @@ class RWKV_Block(nn.Cell):
         return self.att_output(x)
 
 
-    def forward(self, x: mindspore.Tensor, state: mindspore.Tensor, i: int) -> mindspore.Tensor:
+    def construct(self, x: mindspore.Tensor, state: mindspore.Tensor, i: int) -> mindspore.Tensor:
         """
         模型的前向传播。
         Args:
@@ -382,7 +383,7 @@ class RWKV_RNN(nn.Cell):
         self.head_size = self.n_embd // self.n_head
         self.state_size = [self.num_layer * (2 + self.head_size), self.n_embd]
 
-        print(f"state_size:{self.state_size}") # 这里打印状态的形状
+        print(f"state_size: {self.state_size}") # 这里打印状态的形状
         
         # 初始化模型参数
         self.emb = nn.Embedding(w['emb.weight'].shape[0], w['emb.weight'].shape[1], embedding_table=w['emb.weight'])
@@ -401,6 +402,8 @@ class RWKV_RNN(nn.Cell):
             # 提取当前块的权重
             block_w = {k[len(f'blocks.{i}.'):]: v for k, v in w.items() if f'blocks.{i}.' in k}
             self.blocks.append(RWKV_Block(block_w, self.n_embd, self.n_head, self.onnx_opset))
+            print(f"Loading blocks...[{i + 1}/{self.num_layer}]", end='\r')
+        print()
 
         if self.onnx_opset >= 17:
             self.ln_out = nn.LayerNorm(self.n_embd)
@@ -410,7 +413,7 @@ class RWKV_RNN(nn.Cell):
             self.ln_out_weight = mindspore.Parameter(w['ln_out.weight'])
             self.ln_out_bias = mindspore.Parameter(w['ln_out.bias'])
         
-        self.head = nn.Linear(self.n_embd, args['vocab_size'], bias=False)
+        self.head = nn.Dense(self.n_embd, args['vocab_size'], has_bias=False)
         self.head.weight = mindspore.Parameter(w['head.weight'])
 
     def manual_layer_norm(self, x: mindspore.Tensor, weight: mindspore.Tensor, bias: mindspore.Tensor, eps: float = 1e-5) -> mindspore.Tensor:
@@ -424,14 +427,14 @@ class RWKV_RNN(nn.Cell):
         Returns:
             mindspore.Tensor: 经过手动层归一化后的张量，形状与输入的 x 相同。
         """
-        mean = x.mean(dim=-1, keepdim=True)
-        var = x.var(dim=-1, keepdim=True, unbiased=False)
+        mean = x.mean(axis=-1, keep_dims=True)
+        var = x.var(axis=-1, keepdims=True, ddof=False)
         x_normalized = (x - mean) / ops.sqrt(var + eps)
         x_scaled = x_normalized * weight
         x_shifted = x_scaled + bias
         return x_shifted
 
-    def forward(self, token: mindspore.Tensor, state: mindspore.Tensor) -> Tuple[mindspore.Tensor, mindspore.Tensor]:
+    def construct(self, token: mindspore.Tensor, state: mindspore.Tensor) -> Tuple[mindspore.Tensor, mindspore.Tensor]:
         """
         模型的前向传播。
         Args:

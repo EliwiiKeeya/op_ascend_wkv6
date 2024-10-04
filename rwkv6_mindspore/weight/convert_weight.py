@@ -1,3 +1,10 @@
+# -*- encoding: utf-8 -*-
+# @File        : convert_weight.py
+# @Date        : 2024/10/04 16:28:57
+# @Author      : Eliwii_Keeya
+# @Usage       : https://www.mindspore.cn/mindformers/docs/zh-CN/dev/function/weight_conversion.html#未支持模型权重转换开发
+
+
 import os
 import torch
 import mindspore as ms
@@ -14,12 +21,6 @@ def convert_pt_to_ms(input_path, output_path, dtype=None, **kwargs):
     
     ckpt_list = []
     for name, value in model_torch.items():
-    #     name = name_replace(name)
-    #     if name == 'norm.weight':
-    #         name = 'norm_out.weight'
-    #     if name[:7] == 'layers.':
-    #         name = name[7:]
-
         print(f'\rprocessing parameter: {name} {value.shape}     ', end='', flush=True)
         ckpt_list.append({'name': name, 'data': pt2ms(value, dtype)})
 
