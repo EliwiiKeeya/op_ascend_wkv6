@@ -15,7 +15,7 @@ if __name__ == '__main__':
     mindspore.set_context(device_target="CPU")
     mindspore.run_check()
     args = {
-        'MODEL_NAME': '/mnt/e/Resources/Models/rwkv-6-world/RWKV-x060-World-1B6-v2.1-20240328-ctx4096', #模型文件的名字，ckpt结尾的权重文件。
+        'MODEL_NAME': '/home/Eliwii_Keeya/Main/RWKV-x060-World-1B6-v2.1-20240328-ctx4096/RWKV-x060-World-1B6-v2.1-20240328-ctx4096', #模型文件的名字，ckpt结尾的权重文件。
         'vocab_size': 65536, #词表大小
         'onnx_opset': '12',
     }
@@ -23,7 +23,7 @@ if __name__ == '__main__':
     # 加载模型和分词器
     print("Loading model and tokenizer...")
     model = RWKV_RNN(args)
-    tokenizer = RWKV_TOKENIZER("/home/Eliwii_Keeya/Main/Dev/op_ascend_wkv6/rwkv6_mindspore/asset/rwkv_vocab_v20230424.txt")
+    tokenizer = RWKV_TOKENIZER("/home/Eliwii_Keeya/Main/op_ascend_wkv6/rwkv6_mindspore/asset/rwkv_vocab_v20230424.txt")
     print("Done.")
 
     # 设置续写的初始字符串和参数
