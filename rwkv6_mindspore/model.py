@@ -152,7 +152,7 @@ class RWKV_Block(nn.Cell):
         xk = x + sx * self.ffn_time_maa_k
         xr = x + sx * self.ffn_time_maa_r
         r = ops.sigmoid(self.ffn_receptance(xr))
-        k = silu_manual(self.ffn_key(xk)).pow(2)
+        k = ops.relu(self.ffn_key(xk)).pow(2)
         output = r * self.ffn_value(k)
         return output
 
@@ -180,7 +180,7 @@ class RWKV_Block(nn.Cell):
         xr = x + sx_lerp * self.ffn_time_maa_r
 
         r = ops.sigmoid(self.ffn_receptance(xr)) # [Batch, L, 2048]
-        k = silu_manual(self.ffn_key(xk)).pow(2)
+        k = ops.relu(self.ffn_key(xk)).pow(2)
 
         output = r * self.ffn_value(k)
         return output
