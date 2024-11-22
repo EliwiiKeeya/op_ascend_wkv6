@@ -84,7 +84,7 @@ def sample_logits(out: ops.Tensor, temperature: float = 1.0, top_p: float = 0.8)
     indices_to_remove = sorted_indices_to_remove.scatter(axis=-1, index=sorted_indices, src=sorted_indices_to_remove)
 
     # Use the mask to zero out probabilities that should be removed
-    probabilities.masked_fill(indices_to_remove, 0.0)
+    probabilities[indices_to_remove] = 0.0
 
     # Resample if probabilities are all zero (unlikely but just in case)
     if ops.all(probabilities == 0):
