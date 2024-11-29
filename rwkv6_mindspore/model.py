@@ -9,7 +9,7 @@ import mindspore.nn as nn
 import mindspore.ops as ops
 import mindspore.numpy as np
 from typing import Tuple
-from silu_manual import SiLUManual, silu_manual
+
 
 class RWKV_Block(nn.Cell):
     """
@@ -43,8 +43,7 @@ class RWKV_Block(nn.Cell):
 
 
         # 初始化激活函数
-        # self.silu = nn.SiLU()
-        self.silu = SiLUManual() # NOTE: ops.SiLU 包含错误
+        self.silu = nn.SiLU()
         
         # 初始化注意力参数
         self.att_time_maa_x = mindspore.Parameter(block_w['att.time_maa_x'])
