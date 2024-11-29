@@ -156,35 +156,6 @@ class RWKV_Block(nn.Cell):
         output = r * self.ffn_value(k)
         return output
 
-    def channel_mixing_parallel(self, x: mindspore.Tensor, state: mindspore.Tensor, i: int) -> mindspore.Tensor:
-        """
-        并行通道混合函数
-        Args:
-            x (mindspore.Tensor): 输入张量，形状为[Batch, L, 2048]。
-            state (mindspore.Tensor): 时间状态张量，形状为[Batch, State Size, 2048]。
-            i (int): 时间索引。
-        Returns:
-            mindspore.Tensor: 混合后的张量，形状与输入的x相同。
-        """
-        Batch, L, _ = x.shape
-        i0 = (2 + self.head_size) * i + 0
-        
-        sx_lerp = np.empty(x.shape)
-        sx_lerp[:, 0] = state[:, i0] - x[:, 0]
-        
-        for l in range(1, L):
-            sx_lerp[:, l] = x[:, l-1] - x[:, l]
-        state[:, i0] = x[:, -1] # 这里把state赋值为最后一个输入
-
-        xk = x + sx_lerp * self.ffn_time_maa_k
-        xr = x + sx_lerp * self.ffn_time_maa_r
-
-        r = ops.sigmoid(self.ffn_receptance(xr)) # [Batch, L, 2048]
-        k = ops.relu(self.ffn_key(xk)).pow(2)
-
-        output = r * self.ffn_value(k)
-        return output
-
     def time_mixing(self, x: mindspore.Tensor, state: mindspore.Tensor, i: int) -> mindspore.Tensor:
         """
         时间混合函数。
@@ -241,77 +212,6 @@ class RWKV_Block(nn.Cell):
         # 应用输出层并返回结果
         return self.att_output(x)
 
-    def time_mixing_parallel(self, x: mindspore.Tensor, state: mindspore.Tensor, i: int) -> mindspore.Tensor:
-        """
-        并行处理的时间混合函数。
-        Args:
-            x (mindspore.Tensor): 输入张量，形状为[Batch, L, 2048]。
-            state (mindspore.Tensor): 时间状态张量，形状为[Batch, State Size, 2048]。
-            i (int): 时间索引。
-        Returns:
-            mindspore.Tensor: 混合后的时间状态张量，形状与输入的state相同。
-        """
-        batch_size, L, H, S = x.shape[0], x.shape[1], self.n_head, self.head_size
-        i1 = (2 + S) * i + 1
-        # 初始化结果张量
-        sx_lerp = mindspore.numpy.empty(x.shape)
-        
-        # 计算初始插值
-        sx_lerp[:, 0] = state[:, i1] - x[:, 0]
-        # 逐步计算差值并存入结果张量中
-        for l in range(1, L):
-            sx_lerp[:, l] = x[:, l-1] - x[:, l]
-        state[:, i1] = x[:, -1] # 这里把state赋值为最后一个输入
-        
-        xxx = x + sx_lerp * self.att_time_maa_x # torch.Size([B, L, 2048])
-        xxx = ops.tanh(xxx @ self.att_time_maa_w1).view(batch_size, L, 5, 1, -1) # att_time_maa_w1: [2048, 160]
-        xxx = ops.matmul(xxx, self.att_time_maa_w2).view(batch_size, L, 5, -1) # [Batch, L, 5, 2048] 
-        # att_time_maa_w2: torch.Size([5, 32, 2048])
-        mw, mk, mv, mr, mg = xxx.unbind(dim=2) # [10, 100, 2048]
-        
-        xw = x + sx_lerp * (self.att_time_maa_w + mw) # torch.Size([B, L, 2048])
-        xk = x + sx_lerp * (self.att_time_maa_k + mk)
-        xv = x + sx_lerp * (self.att_time_maa_v + mv)
-        xr = x + sx_lerp * (self.att_time_maa_r + mr)
-        xg = x + sx_lerp * (self.att_time_maa_g + mg)
-        # self.att_time_decay_w1 [2048, 64]
-        w = (self.att_time_decay + (ops.tanh(xw @ self.att_time_decay_w1) @ self.att_time_decay_w2))
-        # 计算注意力机制的权重
-        # 此时w torch.Size([B, L, 2048])
-        w = ops.exp(-ops.exp(w.view(batch_size, L, H, S, 1)))
-        # 计算注意力机制的组件
-        r = self.att_receptance(xr).view(batch_size, L, H, 1, S)
-        k = self.att_key(xk).view(batch_size, L, H, S, 1)
-        v = self.att_value(xv).view(batch_size, L, H, 1, S)
-        g = self.silu(self.att_gate(xg)) # [10, 100, 2048]
-        # 使用注意力机制更新状态
-        state_s = mindspore.numpy.empty((batch_size, L, H, S, S))#初始化state_s的结果张量
-        s = state[:, (2+S)*i+2:(2+S)*(i+1)].view(batch_size, H, S, S)
-        state_s[:, 0] = s # 把第一个a_{t-1, j}赋值给state_s
-        a = k @ v # a: [batch_size, L, H, S, S]
-        
-        for l in range(L-1):
-            s = a[:, l] + w[:, l] * s
-            state_s[:, l+1] = s # 循环赋值
-            
-        s = a[:, -1] + w[:, -1] * s #这里计算出最后一个state的值赋值给传入的state
-        state[:, (2+S)*i+2:(2+S)*(i+1)] = s.view(batch_size, S, -1)
-        
-        x = r @ (self.att_time_faaaa * a + state_s)
-        # self.att_time_faaaa: [32, 64, 1]
-        # x [batch_size, L, H, 1, S]
-
-        # 展平x并应用组归一化
-        if self.onnx_opset >= 18:
-            x = self.att_group_norm(x.flatten(start_dim=2).view(batch_size * L, -1)).view(batch_size, L, -1) * g
-        else:
-            x = x.flatten(start_dim=2).view(batch_size * L, -1)
-            x = self.manual_group_norm(x, num_groups=H, weight=self.att_group_norm_weight, bias=self.att_group_norm_bias).view(batch_size, L, -1) * g #因为组归一化强制要求Channel维度在第二个维度
-
-        # 应用输出层并返回结果
-        return self.att_output(x)
-
-
     def construct(self, x: mindspore.Tensor, state: mindspore.Tensor, i: int) -> mindspore.Tensor:
         """
         模型的前向传播。
@@ -330,24 +230,7 @@ class RWKV_Block(nn.Cell):
             x = x + self.channel_mixing(self.manual_layer_norm(x, self.ln2_weight, self.ln2_bias, 1e-5), state, i)
         return x
         
-    def forward_parallel(self, x: mindspore.Tensor, state: mindspore.Tensor, i: int) -> mindspore.Tensor:
-        """
-        模型的并行前向传播。
-        Args:
-            x (mindspore.Tensor): 输入张量，形状为[Batch, L, N_embd]。
-            state (mindspore.Tensor): 隐藏状态张量，形状为[Batch, State Size, N_embd]。
-            i (int): 时间索引。
-        Returns:
-            mindspore.Tensor: 前向传播结果张量，形状与输入的x相同。
-        """
-        if self.onnx_opset >= 17:
-            x = x + self.time_mixing_parallel(self.ln1(x), state, i)
-            x = x + self.channel_mixing_parallel(self.ln2(x), state, i)
-        else:
-            x = x + self.time_mixing_parallel(self.manual_layer_norm(x, self.ln1_weight, self.ln1_bias, 1e-5), state, i)
-            x = x + self.channel_mixing_parallel(self.manual_layer_norm(x, self.ln2_weight, self.ln2_bias, 1e-5), state, i)
-        return x
-    
+
 class RWKV_RNN(nn.Cell):
     """
     RWKV模型的RNN结构。
@@ -452,30 +335,6 @@ class RWKV_RNN(nn.Cell):
         for i, block in enumerate(self.blocks):
             x = block(x, state, i)
             
-        if self.onnx_opset >= 17:
-            x = self.ln_out(x)
-        else:
-            x = self.manual_layer_norm(x, self.ln_out_weight, self.ln_out_bias, 1e-5) 
-        x = self.head(x)
-        return x, state
-
-    def forward_parallel(self, token: mindspore.Tensor, state: mindspore.Tensor) -> Tuple[mindspore.Tensor, mindspore.Tensor]:
-        """
-        模型的并行前向传播。
-        Args:
-            token (mindspore.Tensor): 输入的令牌张量。[Batch_size, L]
-            state (mindspore.Tensor): 隐藏状态张量。[Batch_size, State_size, N_embd]
-        Returns:
-            mindspore.Tensor: 模型输出。
-        """
-        x = self.emb(token)
-        if self.onnx_opset >= 17:
-            x = self.ln0(x)
-        else:
-            x = self.manual_layer_norm(x, self.ln0_weight, self.ln0_bias, 1e-5)
-        # 开始循环推理RWKV Block   
-        for i, block in enumerate(self.blocks):
-            x = block.forward_parallel(x, state, i)
         if self.onnx_opset >= 17:
             x = self.ln_out(x)
         else:
