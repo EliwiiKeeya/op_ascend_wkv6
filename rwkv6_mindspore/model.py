@@ -28,19 +28,14 @@ class RWKV_Block(nn.Cell):
         self.onnx_opset = onnx_opset
         
         # 初始化层归一化
-        if self.onnx_opset >= 17:
-            self.ln1 = nn.LayerNorm(n_embd)
-            self.ln1.weight = mindspore.Parameter(block_w['ln1.weight'])
-            self.ln1.bias = mindspore.Parameter(block_w['ln1.bias'])
-            self.ln2 = nn.LayerNorm(n_embd)
-            self.ln2.weight = mindspore.Parameter(block_w['ln2.weight'])
-            self.ln2.bias = mindspore.Parameter(block_w['ln2.bias'])
-        else:
-            self.ln1_weight = mindspore.Parameter(block_w['ln1.weight'])
-            self.ln1_bias = mindspore.Parameter(block_w['ln1.bias'])
-            self.ln2_weight = mindspore.Parameter(block_w['ln2.weight'])
-            self.ln2_bias = mindspore.Parameter(block_w['ln2.bias'])
-
+        self.ln1 = nn.LayerNorm((n_embd,),
+                                gamma_init=mindspore.Parameter(block_w['ln1.weight']),
+                                beta_init=mindspore.Parameter(block_w['ln1.bias']),
+                                epsilon=1e-5)
+        self.ln2 = nn.LayerNorm((n_embd,),
+                                gamma_init=mindspore.Parameter(block_w['ln2.weight']),
+                                beta_init=mindspore.Parameter(block_w['ln2.bias']),
+                                epsilon=1e-5)
 
         # 初始化激活函数
         self.silu = nn.SiLU()
@@ -86,24 +81,6 @@ class RWKV_Block(nn.Cell):
         self.ffn_receptance.weight = mindspore.Parameter(block_w['ffn.receptance.weight'])
         self.ffn_value = nn.Dense(self.n_embd, self.n_embd, has_bias=False)
         self.ffn_value.weight = mindspore.Parameter(block_w['ffn.value.weight'])
-
-    def manual_layer_norm(self, x: mindspore.Tensor, weight: mindspore.Tensor, bias: mindspore.Tensor, eps: float = 1e-5) -> mindspore.Tensor:
-        """
-        人工层归一化函数
-        Args:
-            x (mindspore.Tensor): 输入张量，形状为 [Batch, *]，* 表示任意维度。
-            weight (mindspore.Tensor): 归一化的权重张量，形状为 [*]，* 表示与输入张量 x 的最后一个维度相同。
-            bias (mindspore.Tensor): 归一化的偏置张量，形状为 [*]，* 表示与输入张量 x 的最后一个维度相同。
-            eps (float): 用于数值稳定性的小值，防止除以零。
-        Returns:
-            mindspore.Tensor: 经过手动层归一化后的张量，形状与输入的 x 相同。
-        """
-        mean = x.mean(axis=-1, keep_dims=True)
-        var = x.var(axis=-1, keepdims=True, ddof=False)
-        x_normalized = (x - mean) / ops.sqrt(var + eps)
-        x_scaled = x_normalized * weight#.unsqueeze(-1) #这里会自动广播对齐
-        x_shifted = x_scaled + bias#.unsqueeze(-1)
-        return x_shifted
         
     def manual_group_norm(self, x: mindspore.Tensor, num_groups: int, weight: mindspore.Tensor, bias: mindspore.Tensor, eps: float = 1e-5) -> mindspore.Tensor:
         """
@@ -221,12 +198,8 @@ class RWKV_Block(nn.Cell):
         Returns:
             mindspore.Tensor: 前向传播结果张量，形状与输入的x相同。
         """
-        if self.onnx_opset >= 17:
-            x = x + self.time_mixing(self.ln1(x), state, i)
-            x = x + self.channel_mixing(self.ln2(x), state, i)
-        else:
-            x = x + self.time_mixing(self.manual_layer_norm(x, self.ln1_weight, self.ln1_bias, 1e-5), state, i)
-            x = x + self.channel_mixing(self.manual_layer_norm(x, self.ln2_weight, self.ln2_bias, 1e-5), state, i)
+        x = x + self.time_mixing(self.ln1(x), state, i)
+        x = x + self.channel_mixing(self.ln2(x), state, i)
         return x
         
 
@@ -269,15 +242,10 @@ class RWKV_RNN(nn.Cell):
         
         # 初始化模型参数
         self.emb = nn.Embedding(w['emb.weight'].shape[0], w['emb.weight'].shape[1], embedding_table=w['emb.weight'])
-
-        if self.onnx_opset >= 17:
-            self.ln0 = nn.LayerNorm(self.n_embd)
-            self.ln0.weight = mindspore.Parameter(w['blocks.0.ln0.weight'])
-            self.ln0.bias = mindspore.Parameter(w['blocks.0.ln0.bias'])
-        else:
-            self.ln0_weight = mindspore.Parameter(w['blocks.0.ln0.weight'])
-            self.ln0_bias = mindspore.Parameter(w['blocks.0.ln0.bias'])
-
+        self.ln0 = nn.LayerNorm((self.n_embd,),
+                                gamma_init=mindspore.Parameter(w['blocks.0.ln0.weight']),
+                                beta_init=mindspore.Parameter(w['blocks.0.ln0.bias']),
+                                epsilon=1e-5)
         self.blocks = nn.CellList()
         
         for i in range(self.num_layer):
@@ -287,34 +255,12 @@ class RWKV_RNN(nn.Cell):
             print(f"Loading blocks...[{i + 1}/{self.num_layer}]", end='\r')
         print()
 
-        if self.onnx_opset >= 17:
-            self.ln_out = nn.LayerNorm(self.n_embd)
-            self.ln_out.weight = mindspore.Parameter(w['ln_out.weight'])
-            self.ln_out.bias = mindspore.Parameter(w['ln_out.bias'])
-        else:
-            self.ln_out_weight = mindspore.Parameter(w['ln_out.weight'])
-            self.ln_out_bias = mindspore.Parameter(w['ln_out.bias'])
-        
+        self.ln_out = nn.LayerNorm((self.n_embd,),
+                                    gamma_init=mindspore.Parameter(w['ln_out.weight']),
+                                    beta_init=mindspore.Parameter(w['ln_out.bias']),
+                                    epsilon=1e-5)
         self.head = nn.Dense(self.n_embd, args['vocab_size'], has_bias=False)
         self.head.weight = mindspore.Parameter(w['head.weight'])
-
-    def manual_layer_norm(self, x: mindspore.Tensor, weight: mindspore.Tensor, bias: mindspore.Tensor, eps: float = 1e-5) -> mindspore.Tensor:
-        """
-        人工层归一化函数
-        Args:
-            x (mindspore.Tensor): 输入张量，形状为 [Batch, *]，* 表示任意维度。
-            weight (mindspore.Tensor): 归一化的权重张量，形状为 [*]，* 表示与输入张量 x 的最后一个维度相同。
-            bias (mindspore.Tensor): 归一化的偏置张量，形状为 [*]，* 表示与输入张量 x 的最后一个维度相同。
-            eps (float): 用于数值稳定性的小值，防止除以零。
-        Returns:
-            mindspore.Tensor: 经过手动层归一化后的张量，形状与输入的 x 相同。
-        """
-        mean = x.mean(axis=-1, keep_dims=True)
-        var = x.var(axis=-1, keepdims=True, ddof=False)
-        x_normalized = (x - mean) / ops.sqrt(var + eps)
-        x_scaled = x_normalized * weight
-        x_shifted = x_scaled + bias
-        return x_shifted
 
     def construct(self, token: mindspore.Tensor, state: mindspore.Tensor) -> Tuple[mindspore.Tensor, mindspore.Tensor]:
         """
@@ -326,17 +272,10 @@ class RWKV_RNN(nn.Cell):
             mindspore.Tensor: 模型输出。
         """
         x = self.emb(token)
-        if self.onnx_opset >= 17:
-            x = self.ln0(x)
-        else:
-            x = self.manual_layer_norm(x, self.ln0_weight, self.ln0_bias, 1e-5)
+        x = self.ln0(x)
         # 开始循环推理RWKV Block    
         for i, block in enumerate(self.blocks):
             x = block(x, state, i)
-            
-        if self.onnx_opset >= 17:
-            x = self.ln_out(x)
-        else:
-            x = self.manual_layer_norm(x, self.ln_out_weight, self.ln_out_bias, 1e-5) 
+        x = self.ln_out(x)
         x = self.head(x)
         return x, state
