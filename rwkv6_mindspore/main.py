@@ -18,7 +18,6 @@ if __name__ == '__main__':
     args = {
         'MODEL_NAME': '/home/Eliwii_Keeya/Main/RWKV-x060-World-3B/RWKV-x060-World-3B-v2.1-20240417-ctx4096', #模型文件的名字，ckpt结尾的权重文件。
         'vocab_size': 65536, #词表大小
-        'onnx_opset': '12',
     }
 
     # 加载模型和分词器

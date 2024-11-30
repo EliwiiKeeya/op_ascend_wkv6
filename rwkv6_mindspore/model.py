@@ -20,12 +20,11 @@ class RWKV_Block(nn.Cell):
         n_embd (int): 嵌入维度。
         n_head (int): 头数。
     """
-    def __init__(self, block_w: dict, n_embd: int, n_head: int, onnx_opset = 16):
+    def __init__(self, block_w: dict, n_embd: int, n_head: int):
         super().__init__()
         self.n_embd = n_embd
         self.n_head = n_head
         self.head_size = n_embd // n_head
-        self.onnx_opset = onnx_opset
         
         # 初始化层归一化
         self.ln1 = nn.LayerNorm((n_embd,),
@@ -63,14 +62,12 @@ class RWKV_Block(nn.Cell):
         self.att_output.weight = mindspore.Parameter(block_w['att.output.weight'])
         self.att_gate = nn.Dense(self.n_embd, self.n_embd, has_bias=False)
         self.att_gate.weight = mindspore.Parameter(block_w['att.gate.weight'])
-        
-        if self.onnx_opset >= 18:
-            self.att_group_norm = nn.GroupNorm(num_groups=n_head, num_channels=n_embd, eps=1e-5, affine=True)
-            self.att_group_norm.weight = mindspore.Parameter(block_w['att.ln_x.weight'])
-            self.att_group_norm.bias = mindspore.Parameter(block_w['att.ln_x.bias'])
-        else:
-            self.att_group_norm_weight = mindspore.Parameter(block_w['att.ln_x.weight'])
-            self.att_group_norm_bias = mindspore.Parameter(block_w['att.ln_x.bias'])
+        self.att_group_norm = nn.GroupNorm(num_groups=n_head,
+                                            num_channels=n_embd,
+                                            eps=1e-5,
+                                            affine=True,
+                                            gamma_init=mindspore.Parameter(block_w['att.ln_x.weight']),
+                                            beta_init=mindspore.Parameter(block_w['att.ln_x.bias']))
             
         # 初始化前馈参数
         self.ffn_time_maa_k = mindspore.Parameter(block_w['ffn.time_maa_k'])
@@ -81,34 +78,6 @@ class RWKV_Block(nn.Cell):
         self.ffn_receptance.weight = mindspore.Parameter(block_w['ffn.receptance.weight'])
         self.ffn_value = nn.Dense(self.n_embd, self.n_embd, has_bias=False)
         self.ffn_value.weight = mindspore.Parameter(block_w['ffn.value.weight'])
-        
-    def manual_group_norm(self, x: mindspore.Tensor, num_groups: int, weight: mindspore.Tensor, bias: mindspore.Tensor, eps: float = 1e-5) -> mindspore.Tensor:
-        """
-        人工组归一化函数。
-        Args:
-            x (mindspore.Tensor): 输入张量，形状为 [Batch, 2048]。（或者[Batch*L, 2048]）
-            num_groups (int): 分组数，这里为 RWKV 的注意力头数。
-            weight (mindspore.Tensor): 归一化的权重张量，形状为 [2048]。
-            bias (mindspore.Tensor): 归一化的偏置张量，形状为 [2048]。
-            eps (float): 用于数值稳定性的小值，防止除以零。
-        Returns:
-            mindspore.Tensor: 经过人工组归一化后的张量，形状与输入的 x 相同。
-        """
-        N, C = x.shape
-        #if C % num_groups != 0:
-            #raise ValueError("num_channels must be divisible by num_groups")
-        #加上这个会有无法推断静态图的警告
-        channels_per_group = C // num_groups
-        # 重塑x以便于分组
-        x = x.view(N, num_groups, channels_per_group)
-        mean = x.mean(axis=2, keep_dims=True)
-        var = x.var(axis=2, keepdims=True, ddof=False)
-        x_normalized = (x - mean) / ops.sqrt(var + eps)
-        x_normalized = x_normalized.view(N, C)
-        # 应用权重和偏置
-        x_scaled = x_normalized * weight
-        x_shifted = x_scaled + bias
-        return x_shifted
 
     def channel_mixing(self, x: mindspore.Tensor, state: mindspore.Tensor, i: int) -> mindspore.Tensor:
         """
@@ -179,12 +148,8 @@ class RWKV_Block(nn.Cell):
         state[:, (2+S)*i+2:(2+S)*(i+1), :] = s.view(batch_size, S, -1)
 
         # 展平x并应用组归一化和门控
-        if self.onnx_opset >= 18:
-            x = self.att_group_norm(x.flatten(start_dim=1)) * g
-        else:
-            x = x.flatten(start_dim=1) 
-            x = self.manual_group_norm(x, num_groups=H, weight=self.att_group_norm_weight, bias=self.att_group_norm_bias) * g
-        
+        x = self.att_group_norm(x.flatten(start_dim=1)) * g
+
         # 应用输出层并返回结果
         return self.att_output(x)
 
@@ -213,11 +178,6 @@ class RWKV_RNN(nn.Cell):
     def __init__(self, args: dict):
         super().__init__()
         self.args = args
-        try:
-            self.onnx_opset = int(args['onnx_opset'])
-        except:
-            self.onnx_opset = 16 #默认是最低的，op17版本才支持LayerNorm算子，op18版本才支持GroupNorm算子
-        print('onnx opset ', self.onnx_opset)
         self.set_train(False)
 
         # 加载权重
@@ -251,7 +211,7 @@ class RWKV_RNN(nn.Cell):
         for i in range(self.num_layer):
             # 提取当前块的权重
             block_w = {k[len(f'blocks.{i}.'):]: v for k, v in w.items() if f'blocks.{i}.' in k}
-            self.blocks.append(RWKV_Block(block_w, self.n_embd, self.n_head, self.onnx_opset))
+            self.blocks.append(RWKV_Block(block_w, self.n_embd, self.n_head))
             print(f"Loading blocks...[{i + 1}/{self.num_layer}]", end='\r')
         print()
 
