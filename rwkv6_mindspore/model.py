@@ -117,14 +117,14 @@ class RWKV_Block(nn.Cell):
         """
         batch_size, H, S = x.shape[0], self.n_head, self.head_size
 
-        sx = (state[:, self.i1] - x).unsqueeze(1)
+        sx = (state[:, self.i1] - x)
         state[:, self.i1] = x
 
         xxx = x + sx * self.att_time_maa_x
         xxx = ops.tanh(xxx @ self.att_time_maa_w1).view(batch_size, 5, 1, -1)
         xxx = ops.matmul(xxx, self.att_time_maa_w2).view(batch_size, 5, -1)
 
-        xw, xk, xv, xr, xg = ops.unstack(x.unsqueeze(1) + sx * (self.att_time_maa + xxx), axis=1)
+        xw, xk, xv, xr, xg = ops.unstack(x.unsqueeze(1) + sx.unsqueeze(1) * (self.att_time_maa + xxx), axis=1)
 
         w = (self.att_time_decay + (ops.tanh(xw @ self.att_time_decay_w1) @ self.att_time_decay_w2))
         
