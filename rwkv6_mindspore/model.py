@@ -7,7 +7,6 @@
 import mindspore
 import mindspore.nn as nn
 import mindspore.ops as ops
-import mindspore.numpy as np
 from typing import Tuple
 
 
@@ -48,11 +47,11 @@ class RWKV_Block(nn.Cell):
         
         # 初始化注意力参数
         self.att_time_maa_x = mindspore.Parameter(block_w['att.time_maa_x'])
-        self.att_time_maa_w = mindspore.Parameter(block_w['att.time_maa_w'])
-        self.att_time_maa_k = mindspore.Parameter(block_w['att.time_maa_k'])
-        self.att_time_maa_v = mindspore.Parameter(block_w['att.time_maa_v'])
-        self.att_time_maa_r = mindspore.Parameter(block_w['att.time_maa_r'])
-        self.att_time_maa_g = mindspore.Parameter(block_w['att.time_maa_g'])
+        self.att_time_maa = mindspore.Parameter(ops.stack([block_w['att.time_maa_w'],
+                                                           block_w['att.time_maa_k'],
+                                                           block_w['att.time_maa_v'],
+                                                           block_w['att.time_maa_r'],
+                                                           block_w['att.time_maa_g']]))
         self.att_time_maa_w1 = mindspore.Parameter(block_w['att.time_maa_w1'])
         self.att_time_maa_w2 = mindspore.Parameter(block_w['att.time_maa_w2'])
         self.att_time_decay = mindspore.Parameter(block_w['att.time_decay'])
@@ -118,19 +117,14 @@ class RWKV_Block(nn.Cell):
         """
         batch_size, H, S = x.shape[0], self.n_head, self.head_size
 
-        sx = state[:, self.i1] - x
+        sx = (state[:, self.i1] - x).unsqueeze(1)
         state[:, self.i1] = x
-        
+
         xxx = x + sx * self.att_time_maa_x
         xxx = ops.tanh(xxx @ self.att_time_maa_w1).view(batch_size, 5, 1, -1)
         xxx = ops.matmul(xxx, self.att_time_maa_w2).view(batch_size, 5, -1)
-        mw, mk, mv, mr, mg = xxx.unbind(dim=1)
 
-        xw = x + sx * (self.att_time_maa_w + mw)
-        xk = x + sx * (self.att_time_maa_k + mk)
-        xv = x + sx * (self.att_time_maa_v + mv)
-        xr = x + sx * (self.att_time_maa_r + mr)
-        xg = x + sx * (self.att_time_maa_g + mg)
+        xw, xk, xv, xr, xg = ops.unstack(x.unsqueeze(1) + sx * (self.att_time_maa + xxx), axis=1)
 
         w = (self.att_time_decay + (ops.tanh(xw @ self.att_time_decay_w1) @ self.att_time_decay_w2))
         
