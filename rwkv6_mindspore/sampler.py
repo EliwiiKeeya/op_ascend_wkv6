@@ -77,7 +77,7 @@ def sample_logits(out: ops.Tensor, temperature: float = 1.0, top_p: float = 0.8)
     # Remove tokens with a cumulative probability above the threshold (top_p)
     sorted_indices_to_remove = cumulative_probs > top_p
     # Shift the indices to the right to keep the first token above the threshold
-    sorted_indices_to_remove[..., 1:] =  mindspore.numpy.copy(sorted_indices_to_remove[..., :-1])
+    sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].copy()
     sorted_indices_to_remove[..., 0] = 0
 
     # Create a mask for the indices to remove
