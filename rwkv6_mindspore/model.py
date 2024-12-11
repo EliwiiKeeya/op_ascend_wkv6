@@ -18,19 +18,25 @@ class RWKV_Block(nn.Cell):
         block_w (dict): 权重字典。
         n_embd (int): 嵌入维度。
         n_head (int): 头数。
+        state (mindspore.Tensor): 隐藏状态张量。[Batch_size, State_size, N_embd]
         i (int): 时间索引。
     """
-    def __init__(self, block_w: dict, n_embd: int, n_head: int, i: int):
+    def __init__(self, block_w: dict, n_embd: int, n_head: int, state: mindspore.Tensor, i: int):
         super().__init__()
         self.n_embd = n_embd
         self.n_head = n_head
         self.head_size = n_embd // n_head
 
-        # 初始化时间索引
-        self.i0 = (2 + self.head_size) * i + 0
-        self.i1 = (2 + self.head_size) * i + 1
-        self.i2 = (2 + self.head_size) * i + 2
-        self.i3 = (2 + self.head_size) * (i + 1)
+        # 时间状态索引
+        i0 = (2 + self.head_size) * i + 0
+        i1 = (2 + self.head_size) * i + 1
+        i2 = (2 + self.head_size) * i + 2
+        i3 = (2 + self.head_size) * (i + 1)
+
+        # 初始化时间状态视图
+        self.state_view_channel = state[:, i0]
+        self.state_view_time_1 = state[:, i1]
+        self.state_view_time_2 = state[:, i2: i3, :]
         
         # 初始化层归一化
         self.ln1 = nn.LayerNorm((n_embd,),
@@ -85,19 +91,17 @@ class RWKV_Block(nn.Cell):
         self.ffn_value = nn.Dense(self.n_embd, self.n_embd, has_bias=False)
         self.ffn_value.weight = mindspore.Parameter(block_w['ffn.value.weight'])
 
-    def channel_mixing(self, x: mindspore.Tensor, state: mindspore.Tensor) -> mindspore.Tensor:
+    def channel_mixing(self, x: mindspore.Tensor) -> mindspore.Tensor:
         """
         通道混合函数。
 
         Args:
             x (mindspore.Tensor): 输入张量，形状为[Batch, 2048]。
-            state (mindspore.Tensor): 时间状态张量，形状为[Batch, State Size, 2048]。
-
         Returns:
             mindspore.Tensor: 混合后的张量，形状与输入的x相同。
         """
-        sx = state[:, self.i0] - x
-        state[:, self.i0] = x
+        sx = self.state_view_channel - x
+        self.state_view_channel = x
         xk = x + sx * self.ffn_time_maa_k
         xr = x + sx * self.ffn_time_maa_r
         r = ops.sigmoid(self.ffn_receptance(xr))
@@ -105,20 +109,19 @@ class RWKV_Block(nn.Cell):
         output = r * self.ffn_value(k)
         return output
 
-    def time_mixing(self, x: mindspore.Tensor, state: mindspore.Tensor) -> mindspore.Tensor:
+    def time_mixing(self, x: mindspore.Tensor) -> mindspore.Tensor:
         """
         时间混合函数。
 
         Args:
             x (mindspore.Tensor): 输入张量，形状为[Batch, 2048]。
-            state (mindspore.Tensor): 时间状态张量，形状为[Batch, State Size, 2048]。
         Returns:
             mindspore.Tensor: 混合后的时间状态张量，形状与输入的state相同。
         """
         batch_size, H, S = x.shape[0], self.n_head, self.head_size
 
-        sx = (state[:, self.i1] - x)
-        state[:, self.i1] = x
+        sx = (self.state_view_time_1 - x)
+        self.state_view_time_1 = x
 
         xxx = x + sx * self.att_time_maa_x
         xxx = ops.tanh(xxx @ self.att_time_maa_w1).view(batch_size, 5, 1, -1)
@@ -138,11 +141,11 @@ class RWKV_Block(nn.Cell):
         g = self.silu(self.att_gate(xg))
 
         # 使用注意力机制更新状态
-        s = state[:, self.i2: self.i3, :].view(batch_size, H, S, S)
+        s = self.state_view_time_2.view(batch_size, H, S, S)
         a = k @ v
         x = r @ (self.att_time_faaaa * a + s)
         s = a + w * s
-        state[:, self.i2: self.i3, :] = s.view(batch_size, S, -1)
+        self.state_view_time_2 = s.view(batch_size, S, -1)
 
         # 展平x并应用组归一化和门控
         x = self.att_group_norm(x.flatten(start_dim=1)) * g
@@ -150,17 +153,16 @@ class RWKV_Block(nn.Cell):
         # 应用输出层并返回结果
         return self.att_output(x)
 
-    def construct(self, x: mindspore.Tensor, state: mindspore.Tensor) -> mindspore.Tensor:
+    def construct(self, x: mindspore.Tensor) -> mindspore.Tensor:
         """
         模型的前向传播。
         Args:
             x (mindspore.Tensor): 输入张量，形状为[Batch, N_embd]。
-            state (mindspore.Tensor): 隐藏状态张量，形状为[Batch, State Size, N_embd]。
         Returns:
             mindspore.Tensor: 前向传播结果张量，形状与输入的x相同。
         """
-        x = x + self.time_mixing(self.ln1(x), state)
-        x = x + self.channel_mixing(self.ln2(x), state)
+        x = x + self.time_mixing(self.ln1(x))
+        x = x + self.channel_mixing(self.ln2(x))
         return x
         
 
@@ -193,6 +195,7 @@ class RWKV_RNN(nn.Cell):
         self.n_embd = w['blocks.0.ln1.weight'].shape[0]
         self.head_size = self.n_embd // self.n_head
         self.state_size = [self.num_layer * (2 + self.head_size), self.n_embd]
+        self.batch_size = args['batch_size']
 
         print(f"state_size: {self.state_size}") # 这里打印状态的形状
         
@@ -203,11 +206,14 @@ class RWKV_RNN(nn.Cell):
                                 beta_init=mindspore.Parameter(w['blocks.0.ln0.bias']),
                                 epsilon=1e-5)
         self.blocks = nn.CellList()
+
+        # 初始化状态
+        self.state = ops.zeros([self.batch_size, *self.state_size])
         
         for i in range(self.num_layer):
             # 提取当前块的权重
             block_w = {k[len(f'blocks.{i}.'):]: v for k, v in w.items() if f'blocks.{i}.' in k}
-            self.blocks.append(RWKV_Block(block_w, self.n_embd, self.n_head, i))
+            self.blocks.append(RWKV_Block(block_w, self.n_embd, self.n_head, self.state, i))
             print(f"Loading blocks...[{i + 1}/{self.num_layer}]", end='\r')
         print()
 
@@ -218,19 +224,18 @@ class RWKV_RNN(nn.Cell):
         self.head = nn.Dense(self.n_embd, args['vocab_size'], has_bias=False)
         self.head.weight = mindspore.Parameter(w['head.weight'])
 
-    def construct(self, token: mindspore.Tensor, state: mindspore.Tensor) -> Tuple[mindspore.Tensor, mindspore.Tensor]:
+    def construct(self, token: mindspore.Tensor) -> Tuple[mindspore.Tensor, mindspore.Tensor]:
         """
         模型的前向传播。
         Args:
             token (mindspore.Tensor): 输入的令牌张量。[Batch_size]
-            state (mindspore.Tensor): 隐藏状态张量。[Batch_size, State_size, N_embd]
         Returns:
             mindspore.Tensor: 模型输出。
         """
         x = self.emb(token)
         x = self.ln0(x)
         for block in self.blocks:
-            x = block(x, state)
+            x = block(x)
         x = self.ln_out(x)
         x = self.head(x)
-        return x, state
+        return x

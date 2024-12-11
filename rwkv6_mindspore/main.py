@@ -27,28 +27,23 @@ if __name__ == '__main__':
     print("Done.")
 
     # 设置续写的初始字符串和参数
+    BATCH_SIZE = args['batch_size']
     initial_string = "User: 帮我用python写一个打印字符三角形的代码.\n\nAssistant: "
-    batch_size = 3
     TEMPERATURE = 2.5  # 温度参数
     TOP_P = 0.1  # Top-p采样参数
     LENGTH_PER_TRIAL = 50  # 生成的长度
 
     # 编码初始字符串
-    token = mindspore.Tensor(tokenizer.encode([initial_string] * batch_size), dtype=mindspore.int64)
-
-    # 初始化状态
-    state = ops.zeros((batch_size, model.state_size[0], model.state_size[1]))
-    
+    token = mindspore.Tensor(tokenizer.encode([initial_string] * BATCH_SIZE), dtype=mindspore.int64)
     for t in ops.unstack(token, axis=-1):
-        out, state = model(t, state)
+        out = model(t)
     else:
-        # 取最后一个生成的token
         token_sampled = sample_logits(out, TEMPERATURE, TOP_P).type_as(token)
         token = ops.cat((token, token_sampled.unsqueeze(1)), 1)
 
     start_time = time.time() # 开始计时
     for step in range(LENGTH_PER_TRIAL):  # 生成指定数量的token
-        out, state = model(token_sampled, state)
+        out = model(token_sampled)
         token_sampled = sample_logits(out, TEMPERATURE, TOP_P).type_as(token)
         token = ops.cat((token, token_sampled.unsqueeze(1)), 1)
     end_time = time.time() # 结束计时
@@ -59,9 +54,9 @@ if __name__ == '__main__':
         print(f"Batch {i+1}: {seq}")
     
     total_time = end_time - start_time
-    tokens_generated = LENGTH_PER_TRIAL * batch_size
+    tokens_generated = LENGTH_PER_TRIAL * BATCH_SIZE
     speed = tokens_generated / total_time
-    speed_per_batch = speed / batch_size
+    speed_per_batch = speed / BATCH_SIZE
     print(f"\nTotal time: {total_time:.2f} seconds")
     print(f"Tokens generated: {tokens_generated}")
     print(f"Token generation speed: {speed:.2f} tokens/second")
